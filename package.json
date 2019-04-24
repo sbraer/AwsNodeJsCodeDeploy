@@ -1,0 +1,25 @@
+{
+  "name": "nodejsdeploy",
+  "version": "0.0.1",
+  "description": "Api Rest to update docker image in swarm",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node app.js",
+    "postpublish": "PACKAGE_VERSION=$(cat package.json | grep version | head -1 | awk -F: '{ print $2 }' | sed 's/[\",]//g' | tr -d '[[:space:]]') && git tag $PACKAGE_VERSION && git push --tags"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sbraer/AwsNodeJsCodeDeploy.git"
+  },
+  "keywords": [
+    "docker",
+    "swarm"
+  ],
+  "author": "AZ",
+  "license": "ISC",
+  "dependencies": {
+    "body-parser": "^1.18.3",
+    "express": "^4.16.4"
+  }
+}
