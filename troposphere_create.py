@@ -223,7 +223,7 @@ keyPar_param = template.add_parameter(Parameter(
 policies = []
 if len(CodeCommitResource) > 0:
     policies.append(Policy(
-            PolicyName="GitPolicy",
+            PolicyName=environmentString + "GitPolicy",
             PolicyDocument=awacs.aws.Policy(
                 Statement=[
                     Statement(
@@ -241,7 +241,7 @@ if len(CodeCommitResource) > 0:
         ))
 
 policies.append(Policy(
-            PolicyName="CWMyLogPolicy",
+            PolicyName=environmentString + "CWMyLogPolicy",
             PolicyDocument=awacs.aws.Policy(
                 Statement=[
                     Statement(
@@ -253,6 +253,31 @@ policies.append(Policy(
                             Action("logs", "DescribeLogStreams"),
                         ],
                         Resource=["arn:aws:logs:*:*:*"]
+                    )
+                ]
+            )
+        )
+    )
+
+policies.append(Policy(
+            PolicyName=environmentString + "CloudStor",
+            PolicyDocument=awacs.aws.Policy(
+                Statement=[
+                    Statement(
+                        Effect=Allow,
+                        Action=[
+                            Action("ec2", "CreateTags"),
+                            Action("ec2", "AttachVolume"),
+                            Action("ec2", "DetachVolume"),
+                            Action("ec2", "CreateVolume"),
+                            Action("ec2", "DeleteVolume"),
+                            Action("ec2", "DescribeVolumes"),
+                            Action("ec2", "DescribeVolumeStatus"),
+                            Action("ec2", "CreateSnapshot"),
+                            Action("ec2", "DeleteSnapshot"),
+                            Action("ec2", "DescribeSnapshots")
+                        ],
+                        Resource=["*"]
                     )
                 ]
             )
