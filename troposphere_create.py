@@ -58,6 +58,10 @@ systemctl enable awslogsd.service
 echo 'Start service in [nameMaster]' > /var/log/messages-stack
 #git config --system credential.helper '!aws codecommit credential-helper $@'
 #git config --system credential.UseHttpPath true
+
+# Use this command if you only want to support EBS
+docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.03.0-ce-aws1 CLOUD_PLATFORM=AWS AWS_REGION=$AwsRegion EFS_SUPPORTED=0 DEBUG=1
+
 rm -rf /scripts
 mkdir /scripts
 cd /scripts
@@ -79,7 +83,10 @@ sed -i '/ExecStart=\/usr\/bin\/dockerd $OPTIONS $DOCKER_STORAGE_OPTIONS/cExecSta
 service docker start
 systemctl enable docker
 
+AwsRegion=$(curl -s 169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/.$//')
 yum install -y git
+# Use this command if you only want to support EBS
+docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.03.0-ce-aws1 CLOUD_PLATFORM=AWS AWS_REGION=$AwsRegion EFS_SUPPORTED=0 DEBUG=1
 
 #git config --system credential.helper '!aws codecommit credential-helper $@'
 #git config --system credential.UseHttpPath true
