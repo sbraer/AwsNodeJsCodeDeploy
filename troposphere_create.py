@@ -48,6 +48,7 @@ service docker start
 systemctl enable docker
 
 AwsRegion=$(curl -s 169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/.$//')
+DockerVersion=$(docker version --format '{{.Server.Version}}')
 yum install -y git awslogs
 sed -i -e "s/us-east-1/$AwsRegion/g" /etc/awslogs/awscli.conf
 sed -i -e 's/log_group_name = \/var\/log\/messages/log_group_name = [CloudWatchIdentifier]/g' /etc/awslogs/awslogs.conf
@@ -60,7 +61,7 @@ echo 'Start service in [nameMaster]' > /var/log/messages-stack
 #git config --system credential.UseHttpPath true
 
 # Use this command if you only want to support EBS
-docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.03.0-ce-aws1 CLOUD_PLATFORM=AWS AWS_REGION=$AwsRegion EFS_SUPPORTED=0 DEBUG=1
+docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:${DockerVersion}-aws1 CLOUD_PLATFORM=AWS AWS_REGION=${AwsRegion} EFS_SUPPORTED=0 DEBUG=0
 
 rm -rf /scripts
 mkdir /scripts
@@ -84,9 +85,10 @@ service docker start
 systemctl enable docker
 
 AwsRegion=$(curl -s 169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/.$//')
+DockerVersion=$(docker version --format '{{.Server.Version}}')
 yum install -y git
 # Use this command if you only want to support EBS
-docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.03.0-ce-aws1 CLOUD_PLATFORM=AWS AWS_REGION=$AwsRegion EFS_SUPPORTED=0 DEBUG=1
+docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:${DockerVersion}-aws1 CLOUD_PLATFORM=AWS AWS_REGION=${AwsRegion} EFS_SUPPORTED=0 DEBUG=0
 
 #git config --system credential.helper '!aws codecommit credential-helper $@'
 #git config --system credential.UseHttpPath true
