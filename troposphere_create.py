@@ -1,21 +1,26 @@
 #!/usr/bin/python
 # Value of property VPCZoneIdentifier must be of type List of String
-from awacs.aws import Allow, Statement, Principal, Action
+from awacs.aws import Allow, Principal
 from awacs.sts import AssumeRole
-from troposphere import Parameter, Ref, Sub, Template, Tags, Select, GetAZs, Base64, Output, GetAtt, FindInMap
-from troposphere.iam import Role, InstanceProfile, Policy
+from troposphere import Sub, Select, GetAZs, Base64, Output, GetAtt, FindInMap
+from troposphere.iam import Policy
 from troposphere.ec2 import Route, \
     VPCGatewayAttachment, SubnetRouteTableAssociation, Subnet, RouteTable, \
-    VPC, InternetGateway, \
-    SecurityGroupRule, SecurityGroup
+    VPC, InternetGateway
 import troposphere.ec2 as ec2
 import awacs.aws
-from troposphere.autoscaling import AutoScalingGroup, Tag, LaunchConfiguration
+from troposphere.autoscaling import AutoScalingGroup, Tag
 from troposphere.policies import (
     AutoScalingReplacingUpdate, AutoScalingRollingUpdate, UpdatePolicy
 )
 from troposphere.cloudwatch import Alarm, MetricDimension
-from troposphere.autoscaling import LaunchConfiguration, ScalingPolicy, StepAdjustments
+from troposphere.autoscaling import LaunchConfiguration, ScalingPolicy
+
+from troposphere import FindInMap, Ref, Template, Parameter, Tags
+from troposphere.iam import InstanceProfile, Role
+from troposphere.efs import FileSystem, MountTarget
+from troposphere.ec2 import SecurityGroup, SecurityGroupRule, Instance
+from awacs.aws import Allow, Statement, PolicyDocument, Action
 
 ###############################################################################################
 
@@ -293,6 +298,25 @@ policies.append(Policy(
         )
     )
 
+
+# EFS
+policies.append(Policy(
+            PolicyName=environmentString + "EFS",
+            PolicyDocument=awacs.aws.Policy(
+                Statement=[
+                    Statement(
+                        Effect=Allow,
+                        Action=[
+                            Action('elasticfilesystem', 'DescribeFileSystems'),
+                            Action('elasticfilesystem', 'DescribeTags')
+                        ],
+                        Resource=["*"]
+                    )
+                ]
+            )
+        )
+    )
+
 rootRole = template.add_resource(Role(
     "RootRole",
     AssumeRolePolicyDocument=awacs.aws.Policy(
@@ -430,6 +454,45 @@ instanceSecurityGroup = template.add_resource(
         )
     )
 )
+
+########################### Create EFS #########################################
+
+efs_security_group_rule = SecurityGroupRule(
+    IpProtocol='tcp',
+    FromPort='2049',
+    ToPort='2049',
+    CidrIp=vpc.CidrBlock
+)
+
+# Security group that's applied to the Mount Targets.
+efs_security_group = SecurityGroup(
+    "SecurityGroup",
+    SecurityGroupIngress=[efs_security_group_rule],
+    VpcId=Ref(VPC),
+    GroupDescription="Allow NFS over TCP"
+)
+template.add_resource(efs_security_group)
+
+# Create FileSystem. This is the actual filesystem, which has one or more
+# mount targets. Give it some tags so we can identify it later.
+tags = Tags(Name=environmentString + 'EFSFileSystem')
+efs_file_system = FileSystem(
+    "EFSFileSystem",
+    FileSystemTags=tags
+)
+template.add_resource(efs_file_system)
+
+# create MountTarget. You really want a mount target in each subnet where
+# it's required, but for the purpose of this example we'll
+# put it in just one.
+for f in vpc.subnets:
+    efs_mount_target = MountTarget(
+        "EFSMountTarget" + f.name,
+        FileSystemId=Ref(efs_file_system),
+        SecurityGroups=[Ref(efs_security_group)],
+        SubnetId=Ref(f.instance)
+    )
+    template.add_resource(efs_mount_target)
 
 ########################### create ec2 master ##################################
 for f in vpc.subnets:
@@ -661,3 +724,6 @@ template.add_output(outputs)
 
 print(template.to_yaml())
 #print(template.to_json())
+
+# yum -y install nfs-utils
+# mount -t nfs -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport fs-e742a7bf.efs.eu-central-1.amazonaws.com:/ /efs
