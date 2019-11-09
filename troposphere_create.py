@@ -2,7 +2,7 @@
 # Value of property VPCZoneIdentifier must be of type List of String
 from awacs.aws import Allow, Principal
 from awacs.sts import AssumeRole
-from troposphere import Sub, Select, GetAZs, Base64, Output, GetAtt, FindInMap
+from troposphere import Sub, Select, GetAZs, Base64, Output, GetAtt, FindInMap, Join
 from troposphere.iam import Policy
 from troposphere.ec2 import Route, \
     VPCGatewayAttachment, SubnetRouteTableAssociation, Subnet, RouteTable, \
@@ -52,6 +52,8 @@ amazon-linux-extras install docker -y
 service docker start
 systemctl enable docker
 
+echo "[efsName]" > /info.txt
+
 AwsRegion=$(curl -s 169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/.$//')
 DockerVersion=$(docker version --format '{{.Server.Version}}')
 yum install -y git awslogs
@@ -66,7 +68,8 @@ echo 'Start service in [nameMaster]' > /var/log/messages-stack
 #git config --system credential.UseHttpPath true
 
 # Use this command if you only want to support EBS
-docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:${DockerVersion}-aws1 CLOUD_PLATFORM=AWS AWS_REGION=${AwsRegion} EFS_SUPPORTED=0 DEBUG=0
+#docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:${DockerVersion}-aws1 CLOUD_PLATFORM=AWS AWS_REGION=${AwsRegion} EFS_SUPPORTED=0 DEBUG=0
+docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.06.1-ce-aws1 CLOUD_PLATFORM=AWS EFS_ID_REGULAR=fs-23b3577b EFS_ID_MAXIO=fs-23b3577b AWS_REGION=${AwsRegion} EFS_SUPPORTED=1 DEBUG=0
 
 rm -rf /scripts
 mkdir /scripts
@@ -404,7 +407,7 @@ route = template.add_resource(
     Route(
         'Route',
         DependsOn='AttachGateway',
-        GatewayId=Ref('InternetGateway'),
+        GatewayId=Ref(internetGateway),
         DestinationCidrBlock='0.0.0.0/0',
         RouteTableId=Ref(routeTable),
     )
@@ -505,10 +508,73 @@ for f in vpc.subnets:
             ImageId=FindInMap("RegionMap", Ref("AWS::Region"), "AMI"),
             InstanceType=f.ec2.instanceType,
             KeyName=Ref(keyPar_param),
-            UserData=Base64(USER_DATA_MASTER
+            UserData=Base64(Join('', [
+                """Content-Type: multipart/mixed; boundary="//"
+                MIME-Version: 1.0
+        
+                --//
+                Content-Type: text/cloud-config; charset="us-ascii"
+                MIME-Version: 1.0
+                Content-Transfer-Encoding: 7bit
+                Content-Disposition: attachment; filename="cloud-config.txt"
+        
+                #cloud-config
+                cloud_final_modules:
+                - [scripts-user, always]
+        
+                --//
+                Content-Type: text/x-shellscript; charset="us-ascii"
+                MIME-Version: 1.0
+                Content-Transfer-Encoding: 7bit
+                Content-Disposition: attachment; filename="userdata.txt"
+        
+                #!/bin/bash
+                amazon-linux-extras install epel -y
+                yum update --security -y
+                yum install --enablerepo=epel -y nodejs
+        
+                amazon-linux-extras install docker -y
+                service docker start
+                systemctl enable docker
+        
+                AwsRegion=$(curl -s 169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/.$//')
+                DockerVersion=$(docker version --format '{{.Server.Version}}')
+                yum install -y git awslogs
+                sed -i -e "s/us-east-1/$AwsRegion/g" /etc/awslogs/awscli.conf
+                sed -i -e 's/log_group_name = \/var\/log\/messages/log_group_name = [CloudWatchIdentifier]/g' /etc/awslogs/awslogs.conf
+                sed -i -e 's/log_stream_name = {instance_id}/log_stream_name = messages-stack/g' /etc/awslogs/awslogs.conf
+                sed -i -e 's/\/var\/log\/messages/\/var\/log\/messages-stack/g' /etc/awslogs/awslogs.conf
+                systemctl start awslogsd
+                systemctl enable awslogsd.service
+                echo 'Start service in [nameMaster]' > /var/log/messages-stack
+                #git config --system credential.helper '!aws codecommit credential-helper $@'
+                #git config --system credential.UseHttpPath true
+        
+                # Use this command if you only want to support EBS
+                docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.06.1-ce-aws1 CLOUD_PLATFORM=AWS EFS_ID_REGULAR=""",
+                Ref(efs_file_system),
+                """ EFS_ID_MAXIO=""",
+                Ref(efs_file_system),
+                """ AWS_REGION=${AwsRegion} EFS_SUPPORTED=1 DEBUG=0
+        
+                rm -rf /scripts
+                mkdir /scripts
+                cd /scripts
+                git clone https://github.com/sbraer/AwsNodeJsCodeDeploy.git
+                cd AwsNodeJsCodeDeploy/
+                npm install
+                chmod +x create_swarm.sh
+                chmod +x update_service.sh
+                crontab -r
+                chmod +x docker_login.sh
+                ./docker_login.sh
+                (crontab -l 2>/dev/null; echo "0 */6 * * * /scripts/AwsNodeJsCodeDeploy/docker_login.sh -with args") | crontab -
+                ./create_swarm.sh [ipPrivateList]
+                --//"""
                 .replace("[ipPrivateList]", ipPrivateList)
                 .replace("[CloudWatchIdentifier]", cloudWatchIdentifier)
                 .replace("[nameMaster]", f.ec2.name)
+                ])
                 ),
             Tags=Tags(
                 Name=environmentString + f.ec2.name,
@@ -725,5 +791,4 @@ template.add_output(outputs)
 print(template.to_yaml())
 #print(template.to_json())
 
-# yum -y install nfs-utils
-# mount -t nfs -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport fs-e742a7bf.efs.eu-central-1.amazonaws.com:/ /efs
+# docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.06.1-ce-aws1 CLOUD_PLATFORM=AWS EFS_ID_REGULAR=fs-23b3577b EFS_ID_MAXIO=fs-23b3577b AWS_REGION=eu-central-1 EFS_SUPPORTED=1 DEBUG=1
