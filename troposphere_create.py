@@ -111,7 +111,7 @@ chmod +x join_to_swarm.sh
 
 ###############################################################################################
 class SecurityGroupClass(object):
-    def __init__(self, name=None, cidrBlock = "", type = "", fromPort = -1, toPort = -1):
+    def __init__(self, name=None, cidrBlock="", type="", fromPort=-1, toPort=-1):
         self.name = name
         self.cidrBlock = cidrBlock
         self.type = type
@@ -144,6 +144,8 @@ class VpcClass(object):
         self.CidrBlock = cidrBlock
         self.subnets = []
         self.instance = None
+
+
 #######################################################################################
 
 
@@ -157,7 +159,7 @@ MinSize = 1
 MaxSize = 3
 
 labels = ["web"]
-#labels = ["web", "db"]
+# labels = ["web", "db"]
 
 CodeCommitResource = ["arn:aws:codecommit:eu-central-1:838080890745:AwsCodeTest"]  # or [] to disable this role
 vpc = VpcClass("myVPC", "192.168.0.0/16")
@@ -166,8 +168,8 @@ vpc.subnets.append(SubnetClass("Subnet2", "192.168.16.0/20", 1, True))
 vpc.subnets.append(SubnetClass("Subnet3", "192.168.32.0/20", 2, True))
 
 vpc.subnets[0].ec2 = Ec2Machine("MasterA", "192.168.0.250", instanceTypeMaster)
-#vpc.subnets[1].ec2 = Ec2Machine("MasterB", "192.168.16.250", instanceTypeMaster)
-#vpc.subnets[2].ec2 = Ec2Machine("MasterC", "192.168.32.250", instanceTypeMaster)
+# vpc.subnets[1].ec2 = Ec2Machine("MasterB", "192.168.16.250", instanceTypeMaster)
+# vpc.subnets[2].ec2 = Ec2Machine("MasterC", "192.168.32.250", instanceTypeMaster)
 
 securityMasterIngress = [
     # Used from docker for Swarm Managers
@@ -205,15 +207,16 @@ for f in vpc.subnets:
             ipPrivateList += " "
         ipPrivateList += f.ec2.ip
 
-template = Template("This template deploys a VPC, with a pair of public and private subnets spread across two Availability Zones. It deploys an Internet Gateway, with a default route on the public subnets. It deploys a pair of NAT Gateways (one in each AZ), and default routes for them in the private subnets.")
+template = Template(
+    "This template deploys a VPC, with a pair of public and private subnets spread across two Availability Zones. It deploys an Internet Gateway, with a default route on the public subnets. It deploys a pair of NAT Gateways (one in each AZ), and default routes for them in the private subnets.")
 template.set_version("2010-09-09")
 ########################## MAPPING #####################################################
 
 template.add_mapping('RegionMap', {
-    "ap-south-1":      {"AMI": "ami-0937dcc711d38ef3f"},
-    "eu-west-3":      {"AMI": "ami-0854d53ce963f69d8"},
-    "eu-north-1":      {"AMI": "ami-6d27a913"},
-    "eu-west-2":      {"AMI": "ami-0664a710233d7c148"},
+    "ap-south-1": {"AMI": "ami-0937dcc711d38ef3f"},
+    "eu-west-3": {"AMI": "ami-0854d53ce963f69d8"},
+    "eu-north-1": {"AMI": "ami-6d27a913"},
+    "eu-west-2": {"AMI": "ami-0664a710233d7c148"},
     "eu-west-1": {"AMI": "ami-0fad7378adf284ce0"},
     "ap-northeast-2": {"AMI": "ami-018a9a930060d38aa"},
     "ap-northeast-1": {"AMI": "ami-0d7ed3ddb85b521a6"},
@@ -240,85 +243,84 @@ keyPar_param = template.add_parameter(Parameter(
 policies = []
 if len(CodeCommitResource) > 0:
     policies.append(Policy(
-            PolicyName=environmentString + "GitPolicy",
-            PolicyDocument=awacs.aws.Policy(
-                Statement=[
-                    Statement(
-                        Effect=Allow,
-                        Action=[Action("codecommit", "ListRepositories")],
-                        Resource=["*"]
-                    ),
-                    Statement(
-                        Effect=Allow,
-                        Action=[Action("codecommit", "GitPull")],
-                        Resource=CodeCommitResource
-                    ),
+        PolicyName=environmentString + "GitPolicy",
+        PolicyDocument=awacs.aws.Policy(
+            Statement=[
+                Statement(
+                    Effect=Allow,
+                    Action=[Action("codecommit", "ListRepositories")],
+                    Resource=["*"]
+                ),
+                Statement(
+                    Effect=Allow,
+                    Action=[Action("codecommit", "GitPull")],
+                    Resource=CodeCommitResource
+                ),
+            ],
+        )
+    ))
+
+policies.append(Policy(
+    PolicyName=environmentString + "CWMyLogPolicy",
+    PolicyDocument=awacs.aws.Policy(
+        Statement=[
+            Statement(
+                Effect=Allow,
+                Action=[
+                    Action("logs", "CreateLogGroup"),
+                    Action("logs", "CreateLogStream"),
+                    Action("logs", "PutLogEvents"),
+                    Action("logs", "DescribeLogStreams"),
                 ],
+                Resource=["arn:aws:logs:*:*:*"]
             )
-        ))
+        ]
+    )
+)
+)
 
 policies.append(Policy(
-            PolicyName=environmentString + "CWMyLogPolicy",
-            PolicyDocument=awacs.aws.Policy(
-                Statement=[
-                    Statement(
-                        Effect=Allow,
-                        Action=[
-                            Action("logs", "CreateLogGroup"),
-                            Action("logs", "CreateLogStream"),
-                            Action("logs", "PutLogEvents"),
-                            Action("logs", "DescribeLogStreams"),
-                        ],
-                        Resource=["arn:aws:logs:*:*:*"]
-                    )
-                ]
+    PolicyName=environmentString + "CloudStor",
+    PolicyDocument=awacs.aws.Policy(
+        Statement=[
+            Statement(
+                Effect=Allow,
+                Action=[
+                    Action("ec2", "CreateTags"),
+                    Action("ec2", "AttachVolume"),
+                    Action("ec2", "DetachVolume"),
+                    Action("ec2", "CreateVolume"),
+                    Action("ec2", "DeleteVolume"),
+                    Action("ec2", "DescribeVolumes"),
+                    Action("ec2", "DescribeVolumeStatus"),
+                    Action("ec2", "CreateSnapshot"),
+                    Action("ec2", "DeleteSnapshot"),
+                    Action("ec2", "DescribeSnapshots")
+                ],
+                Resource=["*"]
             )
-        )
+        ]
     )
-
-policies.append(Policy(
-            PolicyName=environmentString + "CloudStor",
-            PolicyDocument=awacs.aws.Policy(
-                Statement=[
-                    Statement(
-                        Effect=Allow,
-                        Action=[
-                            Action("ec2", "CreateTags"),
-                            Action("ec2", "AttachVolume"),
-                            Action("ec2", "DetachVolume"),
-                            Action("ec2", "CreateVolume"),
-                            Action("ec2", "DeleteVolume"),
-                            Action("ec2", "DescribeVolumes"),
-                            Action("ec2", "DescribeVolumeStatus"),
-                            Action("ec2", "CreateSnapshot"),
-                            Action("ec2", "DeleteSnapshot"),
-                            Action("ec2", "DescribeSnapshots")
-                        ],
-                        Resource=["*"]
-                    )
-                ]
-            )
-        )
-    )
-
+)
+)
 
 # EFS
 policies.append(Policy(
-            PolicyName=environmentString + "EFS",
-            PolicyDocument=awacs.aws.Policy(
-                Statement=[
-                    Statement(
-                        Effect=Allow,
-                        Action=[
-                            Action('elasticfilesystem', 'DescribeFileSystems'),
-                            Action('elasticfilesystem', 'DescribeTags')
-                        ],
-                        Resource=["*"]
-                    )
-                ]
+    PolicyName=environmentString + "EFS",
+    PolicyDocument=awacs.aws.Policy(
+        Statement=[
+            Statement(
+                Effect=Allow,
+                Action=[
+                    Action('elasticfilesystem', 'DescribeFileSystems'),
+                    Action('elasticfilesystem', 'DescribeTags')
+                ],
+                Resource=["*"]
             )
-        )
+        ]
     )
+)
+)
 
 rootRole = template.add_resource(Role(
     "RootRole",
@@ -336,7 +338,7 @@ rootRole = template.add_resource(Role(
         "arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM"
     ],
     Path="/",
-    Policies= policies
+    Policies=policies
 ))
 
 rootInstanceProfile = template.add_resource(InstanceProfile(
@@ -417,7 +419,7 @@ route = template.add_resource(
 for f in vpc.subnets:
     template.add_resource(
         SubnetRouteTableAssociation(
-            'SubnetRouteTableAssociation'+f.name,
+            'SubnetRouteTableAssociation' + f.name,
             SubnetId=Ref(f.instance),
             RouteTableId=Ref(routeTable),
         )
@@ -446,7 +448,7 @@ for f in securityMasterEgress:
 
 instanceSecurityGroup = template.add_resource(
     SecurityGroup(
-        environmentString.replace("-", "")+'CustomSecurityGroupIngressMaster',
+        environmentString.replace("-", "") + 'CustomSecurityGroupIngressMaster',
         GroupDescription='CustomSecurity Group Ingress Master',
         SecurityGroupIngress=securityGroupIngress,
         SecurityGroupEgress=securityGroupEgress,
@@ -511,32 +513,32 @@ for f in vpc.subnets:
             UserData=Base64(Join('', [
                 """Content-Type: multipart/mixed; boundary="//"
                 MIME-Version: 1.0
-        
+
                 --//
                 Content-Type: text/cloud-config; charset="us-ascii"
                 MIME-Version: 1.0
                 Content-Transfer-Encoding: 7bit
                 Content-Disposition: attachment; filename="cloud-config.txt"
-        
+
                 #cloud-config
                 cloud_final_modules:
                 - [scripts-user, always]
-        
+
                 --//
                 Content-Type: text/x-shellscript; charset="us-ascii"
                 MIME-Version: 1.0
                 Content-Transfer-Encoding: 7bit
                 Content-Disposition: attachment; filename="userdata.txt"
-        
+
                 #!/bin/bash
                 amazon-linux-extras install epel -y
                 yum update --security -y
                 yum install --enablerepo=epel -y nodejs
-        
+
                 amazon-linux-extras install docker -y
                 service docker start
                 systemctl enable docker
-        
+
                 AwsRegion=$(curl -s 169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/.$//')
                 DockerVersion=$(docker version --format '{{.Server.Version}}')
                 yum install -y git awslogs
@@ -549,14 +551,14 @@ for f in vpc.subnets:
                 echo 'Start service in [nameMaster]' > /var/log/messages-stack
                 #git config --system credential.helper '!aws codecommit credential-helper $@'
                 #git config --system credential.UseHttpPath true
-        
+
                 # Use this command if you only want to support EBS
                 docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.06.1-ce-aws1 CLOUD_PLATFORM=AWS EFS_ID_REGULAR=""",
                 Ref(efs_file_system),
                 """ EFS_ID_MAXIO=""",
                 Ref(efs_file_system),
                 """ AWS_REGION=${AwsRegion} EFS_SUPPORTED=1 DEBUG=0
-        
+
                 rm -rf /scripts
                 mkdir /scripts
                 cd /scripts
@@ -571,11 +573,11 @@ for f in vpc.subnets:
                 (crontab -l 2>/dev/null; echo "0 */6 * * * /scripts/AwsNodeJsCodeDeploy/docker_login.sh -with args") | crontab -
                 ./create_swarm.sh [ipPrivateList]
                 --//"""
-                .replace("[ipPrivateList]", ipPrivateList)
-                .replace("[CloudWatchIdentifier]", cloudWatchIdentifier)
-                .replace("[nameMaster]", f.ec2.name)
-                ])
-                ),
+                                 .replace("[ipPrivateList]", ipPrivateList)
+                                 .replace("[CloudWatchIdentifier]", cloudWatchIdentifier)
+                                 .replace("[nameMaster]", f.ec2.name)
+            ])
+                            ),
             Tags=Tags(
                 Name=environmentString + f.ec2.name,
                 Stack=Ref("AWS::StackName")
@@ -601,7 +603,7 @@ for f in vpc.subnets:
         f.ec2.instance = instance
         alarmMaster = template.add_resource(Alarm(
             "AlarmRecovery" + f.ec2.name,
-            AlarmDescription="Recovery "+f.ec2.name,
+            AlarmDescription="Recovery " + f.ec2.name,
             Namespace="AWS/EC2",
             MetricName="StatusCheckFailed_System",
             Dimensions=[
@@ -644,7 +646,7 @@ for f in securityWorkerEgress:
 
 instanceSecurityWorkerGroup = template.add_resource(
     SecurityGroup(
-        environmentString.replace("-", "")+'CustomSecurityGroupIngressWorker',
+        environmentString.replace("-", "") + 'CustomSecurityGroupIngressWorker',
         GroupDescription='CustomSecurity Group Ingress Master',
         SecurityGroupIngress=securityGroupIngressWorker,
         SecurityGroupEgress=securityGroupEgressWorker,
@@ -656,10 +658,9 @@ instanceSecurityWorkerGroup = template.add_resource(
     )
 )
 
-
 for f in labels:
     LaunchConfig = template.add_resource(LaunchConfiguration(
-        "LaunchConfiguration"+f,
+        "LaunchConfiguration" + f,
         ImageId=FindInMap("RegionMap", Ref("AWS::Region"), "AMI"),
         InstanceType=instanceTypeWorker,
         KeyName=Ref(keyPar_param),
@@ -674,23 +675,23 @@ for f in labels:
                 )
             )
         ]
-        )
+    )
     )
 
     AutoscalingGroupX = template.add_resource(AutoScalingGroup(
-        "AutoscalingGroup"+f,
+        "AutoscalingGroup" + f,
         Cooldown=300,
         HealthCheckGracePeriod=300,
         DesiredCapacity=DesiredCapacity,
         MinSize=MinSize,
         MaxSize=MaxSize,
         Tags=[
-            Tag("Name", environmentString+"AutoscalingGroup"+f, True)
+            Tag("Name", environmentString + "AutoscalingGroup" + f, True)
         ],
         LaunchConfigurationName=Ref(LaunchConfig),
         VPCZoneIdentifier=subnetsList,
         # LoadBalancerNames=[Ref(LoadBalancer)],
-        #AvailabilityZones=subnetsList,
+        # AvailabilityZones=subnetsList,
         HealthCheckType="EC2",
         UpdatePolicy=UpdatePolicy(
             AutoScalingReplacingUpdate=AutoScalingReplacingUpdate(
@@ -706,7 +707,7 @@ for f in labels:
     ))
 
     ScalePolicyUp = template.add_resource(ScalingPolicy(
-        "HTTPRequestScalingPolicyUp"+f,
+        "HTTPRequestScalingPolicyUp" + f,
         AutoScalingGroupName=Ref(AutoscalingGroupX),
         AdjustmentType="ChangeInCapacity",
         Cooldown="300",
@@ -714,7 +715,7 @@ for f in labels:
     ))
 
     ScalePolicyDown = template.add_resource(ScalingPolicy(
-        "HTTPRequestScalingPolicyDown"+f,
+        "HTTPRequestScalingPolicyDown" + f,
         AutoScalingGroupName=Ref(AutoscalingGroupX),
         AdjustmentType="ChangeInCapacity",
         Cooldown="300",
@@ -722,7 +723,7 @@ for f in labels:
     ))
 
     HTTPRequestAlarmUp = template.add_resource(Alarm(
-        "HTTPRequestAlarmUp"+f,
+        "HTTPRequestAlarmUp" + f,
         AlarmDescription="Alarm if Network out is > 4.000.000",
         Namespace="AWS/EC2",
         MetricName="NetworkOut",
@@ -733,7 +734,7 @@ for f in labels:
             ),
         ],
         Statistic="Average",
-        Period="60", # 1 minute
+        Period="60",  # 1 minute
         EvaluationPeriods="1",
         Threshold="4000000",
         ComparisonOperator="GreaterThanOrEqualToThreshold",
@@ -741,7 +742,7 @@ for f in labels:
     ))
 
     HTTPRequestAlarmDown = template.add_resource(Alarm(
-        "HTTPRequestAlarmDown"+f,
+        "HTTPRequestAlarmDown" + f,
         AlarmDescription="Alarm if Network is < 1.000.000",
         Namespace="AWS/EC2",
         MetricName="NetworkOut",
@@ -752,7 +753,7 @@ for f in labels:
             ),
         ],
         Statistic="Average",
-        Period="60", # 1 minute
+        Period="60",  # 1 minute
         EvaluationPeriods="1",
         Threshold="1000000",
         ComparisonOperator="LessThanOrEqualToThreshold",
@@ -764,18 +765,18 @@ for f in labels:
 outputs = []
 
 outputs.append(Output(
-        "VPC",
-        Description="A reference to the created VPC",
-        Value=Ref(VPC),
-    ))
+    "VPC",
+    Description="A reference to the created VPC",
+    Value=Ref(VPC),
+))
 
 for f in vpc.subnets:
     if f.ec2 is not None:
         outputs.append(Output(
-                "PublicIP"+f.ec2.name,
-                Description="Public IP address of the newly created EC2 instance: " + f.ec2.name,
-                Value=GetAtt(f.ec2.instance, "PublicIp")
-            )
+            "PublicIP" + f.ec2.name,
+            Description="Public IP address of the newly created EC2 instance: " + f.ec2.name,
+            Value=GetAtt(f.ec2.instance, "PublicIp")
+        )
         )
 
 for f in vpc.subnets:
@@ -783,12 +784,12 @@ for f in vpc.subnets:
         f.name,
         Description="A reference to the public subnet in the availability Zone",
         Value=Ref(f.instance)
-        )
+    )
     )
 
 template.add_output(outputs)
 
 print(template.to_yaml())
-#print(template.to_json())
+# print(template.to_json())
 
 # docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.06.1-ce-aws1 CLOUD_PLATFORM=AWS EFS_ID_REGULAR=fs-23b3577b EFS_ID_MAXIO=fs-23b3577b AWS_REGION=eu-central-1 EFS_SUPPORTED=1 DEBUG=1
