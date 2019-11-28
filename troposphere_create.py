@@ -113,11 +113,12 @@ class SecurityGroupClass(object):
 
 
 class Ec2Machine(object):
-    def __init__(self, name=None, ip=None, instanceType="t2.micro"):
+    def __init__(self, name=None, ip=None, instanceType="t2.micro", label=None):
         self.name = name
         self.ip = ip
         self.instanceType = instanceType
         self.instance = None
+        self.label = label
 
 
 class SubnetClass(object):
@@ -128,6 +129,7 @@ class SubnetClass(object):
         self.MapPublicIpOnLaunch = mapPublicIpOnLaunch
         self.instance = None
         self.ec2 = None
+        self.db = None
 
 
 class VpcClass(object):
@@ -143,6 +145,7 @@ environmentString = "MyEnvironment-"  # <-- Add dash here
 cloudWatchIdentifier = "Stack2"
 instanceTypeMaster = "t2.micro"
 instanceTypeWorker = "t2.micro"
+instanceTypeDb = "t2.micro"
 
 DesiredCapacity = 1
 MinSize = 1
@@ -160,6 +163,8 @@ vpc.subnets.append(SubnetClass("Subnet3", "192.168.32.0/20", 2, True))
 vpc.subnets[0].ec2 = Ec2Machine("MasterA", "192.168.0.250", instanceTypeMaster)
 #vpc.subnets[1].ec2 = Ec2Machine("MasterB", "192.168.16.250", instanceTypeMaster)
 #vpc.subnets[2].ec2 = Ec2Machine("MasterC", "192.168.32.250", instanceTypeMaster)
+
+vpc.subnets[0].db = Ec2Machine("Mongo1", "192.168.0.250", instanceTypeDb, "mongo1")
 
 securityMasterIngress = [
     # Used from docker for Swarm Managers
@@ -189,6 +194,21 @@ securityWorkerIngress = [
 securityWorkerEgress = [
     SecurityGroupClass("Input", "0.0.0.0/0", "-1"),
 ]
+
+securityDbIngress = [
+    # Used from docker for Swarm Workers
+    SecurityGroupClass("DockerForCommunicationAmongNodesTcp", vpc.CidrBlock, "tcp", 7946, 7946),
+    SecurityGroupClass("DockerForCommunicationAmongNodesUdp", vpc.CidrBlock, "udp", 7946, 7946),
+    SecurityGroupClass("DockerForOverlayNetworkTraffic", vpc.CidrBlock, "udp", 4789, 4789),
+    # My inbound ports
+    SecurityGroupClass("ssh", "0.0.0.0/0", "tcp", 22, 22),
+    SecurityGroupClass("mongodb", "0.0.0.0/0", "tcp", 27017, 27017),
+]
+
+securityDbEgress = [
+    SecurityGroupClass("Input", "0.0.0.0/0", "-1"),
+]
+
 
 ipPrivateList = ""
 for f in vpc.subnets:
@@ -431,6 +451,42 @@ instanceSecurityGroup = template.add_resource(
     )
 )
 
+
+###################### Add PORT #####################################
+
+securityGroupDbIngress = []
+securityGroupDbEgress = []
+
+for f in securityDbIngress:
+    securityGroupDbIngress.append(SecurityGroupRule(
+        IpProtocol=f.type,
+        FromPort=f.fromPort,
+        ToPort=f.toPort,
+        CidrIp=f.cidrBlock
+    ))
+
+for f in securityDbEgress:
+    securityGroupDbEgress.append(SecurityGroupRule(
+        IpProtocol=f.type,
+        FromPort=f.fromPort,
+        ToPort=f.toPort,
+        CidrIp=f.cidrBlock
+    ))
+
+instanceSecurityDbGroup = template.add_resource(
+    SecurityGroup(
+        environmentString.replace("-", "")+'CustomSecurityGroupIngressDb',
+        GroupDescription='CustomSecurity Group Ingress Db',
+        SecurityGroupIngress=securityGroupDbIngress,
+        SecurityGroupEgress=securityGroupDbEgress,
+        VpcId=Ref(VPC),
+        Tags=Tags(
+            Name=environmentString + "CustomSecurityGroupIngressDb",
+            Stack=Ref("AWS::StackName")
+        )
+    )
+)
+
 ########################### create ec2 master ##################################
 for f in vpc.subnets:
     if f.ec2 is not None:
@@ -473,6 +529,57 @@ for f in vpc.subnets:
         alarmMaster = template.add_resource(Alarm(
             "AlarmRecovery" + f.ec2.name,
             AlarmDescription="Recovery "+f.ec2.name,
+            Namespace="AWS/EC2",
+            MetricName="StatusCheckFailed_System",
+            Dimensions=[
+                MetricDimension(
+                    Name="InstanceId",
+                    Value=Ref(instance)
+                ),
+            ],
+            Statistic="Maximum",
+            Period="60",
+            EvaluationPeriods="5",
+            Threshold="0",
+            ComparisonOperator="GreaterThanThreshold",
+            AlarmActions=[Sub('arn:aws:automate:${AWS::Region}:ec2:recover')]
+        ))
+    if f.db is not None:
+        instance = template.add_resource(ec2.Instance(
+            f.db.name,
+            DisableApiTermination="false",
+            InstanceInitiatedShutdownBehavior="stop",
+            IamInstanceProfile=Ref(rootInstanceProfile),
+            ImageId=FindInMap("RegionMap", Ref("AWS::Region"), "AMI"),
+            InstanceType=f.db.instanceType,
+            KeyName=Ref(keyPar_param),
+            UserData=Base64(USER_DATA_WORKER.replace("[ipPrivateList]", ipPrivateList).replace("[label]", f.db.label)),
+            Tags=Tags(
+                Name=environmentString + f.db.name,
+                Stack=Ref("AWS::StackName")
+            ),
+            NetworkInterfaces=[
+                ec2.NetworkInterfaceProperty(
+                    DeleteOnTermination="true",
+                    Description="Primary network interface",
+                    DeviceIndex="0",
+                    SubnetId=Ref(f.instance),
+                    AssociatePublicIpAddress="true",
+                    PrivateIpAddresses=[
+                        ec2.PrivateIpAddressSpecification(
+                            "PrivateIpAddress",
+                            Primary="true",
+                            PrivateIpAddress=f.db.ip
+                        )
+                    ],
+                    GroupSet=[Ref(instanceSecurityDbGroup)]
+                )
+            ],
+        ))
+        f.db.instance = instance
+        alarmMaster = template.add_resource(Alarm(
+            "AlarmRecovery" + f.db.name,
+            AlarmDescription="Recovery "+f.db.name,
             Namespace="AWS/EC2",
             MetricName="StatusCheckFailed_System",
             Dimensions=[
