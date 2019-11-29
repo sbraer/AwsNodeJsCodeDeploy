@@ -164,7 +164,9 @@ vpc.subnets[0].ec2 = Ec2Machine("MasterA", "192.168.0.250", instanceTypeMaster)
 #vpc.subnets[1].ec2 = Ec2Machine("MasterB", "192.168.16.250", instanceTypeMaster)
 #vpc.subnets[2].ec2 = Ec2Machine("MasterC", "192.168.32.250", instanceTypeMaster)
 
-vpc.subnets[0].db = Ec2Machine("Mongo1", "192.168.0.250", instanceTypeDb, "mongo1")
+vpc.subnets[0].db = Ec2Machine("Mongo1", "192.168.0.249", instanceTypeDb, "mongo1")
+vpc.subnets[1].db = Ec2Machine("Mongo2", "192.168.16.249", instanceTypeDb, "mongo2")
+vpc.subnets[2].db = Ec2Machine("Mongo13", "192.168.32.249", instanceTypeDb, "mongo3")
 
 securityMasterIngress = [
     # Used from docker for Swarm Managers
@@ -202,7 +204,7 @@ securityDbIngress = [
     SecurityGroupClass("DockerForOverlayNetworkTraffic", vpc.CidrBlock, "udp", 4789, 4789),
     # My inbound ports
     SecurityGroupClass("ssh", "0.0.0.0/0", "tcp", 22, 22),
-    SecurityGroupClass("mongodb", "0.0.0.0/0", "tcp", 27017, 27017),
+    SecurityGroupClass("mongodb", vpc.CidrBlock, "tcp", 27017, 27017),
 ]
 
 securityDbEgress = [
@@ -489,6 +491,7 @@ instanceSecurityDbGroup = template.add_resource(
 
 ########################### create ec2 master ##################################
 for f in vpc.subnets:
+	# master machine
     if f.ec2 is not None:
         instance = template.add_resource(ec2.Instance(
             f.ec2.name,
@@ -544,6 +547,7 @@ for f in vpc.subnets:
             ComparisonOperator="GreaterThanThreshold",
             AlarmActions=[Sub('arn:aws:automate:${AWS::Region}:ec2:recover')]
         ))
+    # db machine
     if f.db is not None:
         instance = template.add_resource(ec2.Instance(
             f.db.name,
@@ -577,7 +581,7 @@ for f in vpc.subnets:
             ],
         ))
         f.db.instance = instance
-        alarmMaster = template.add_resource(Alarm(
+        alarmdb = template.add_resource(Alarm(
             "AlarmRecovery" + f.db.name,
             AlarmDescription="Recovery "+f.db.name,
             Namespace="AWS/EC2",
@@ -753,6 +757,15 @@ for f in vpc.subnets:
                 "PublicIP"+f.ec2.name,
                 Description="Public IP address of the newly created EC2 instance: " + f.ec2.name,
                 Value=GetAtt(f.ec2.instance, "PublicIp")
+            )
+        )
+
+for f in vpc.subnets:
+    if f.db is not None:
+        outputs.append(Output(
+                "PublicIP"+f.db.name,
+                Description="Public IP address of the newly created EC2 instance: " + f.db.name,
+                Value=GetAtt(f.db.instance, "PublicIp")
             )
         )
 
