@@ -1,30 +1,109 @@
 #!/usr/bin/python
 # Value of property VPCZoneIdentifier must be of type List of String
-from awacs.aws import Allow, Principal
+from awacs.aws import Allow, Statement, Principal, Action
 from awacs.sts import AssumeRole
-from troposphere import Sub, Select, GetAZs, Base64, Output, GetAtt, FindInMap, Join
-from troposphere.iam import Policy
+from troposphere import Parameter, Ref, Sub, Template, Tags, Select, GetAZs, Base64, Output, GetAtt, FindInMap
+from troposphere.iam import Role, InstanceProfile, Policy
 from troposphere.ec2 import Route, \
     VPCGatewayAttachment, SubnetRouteTableAssociation, Subnet, RouteTable, \
-    VPC, InternetGateway
+    VPC, InternetGateway, \
+    SecurityGroupRule, SecurityGroup
 import troposphere.ec2 as ec2
 import awacs.aws
-from troposphere.autoscaling import AutoScalingGroup, Tag
+from troposphere.autoscaling import AutoScalingGroup, Tag, LaunchConfiguration
 from troposphere.policies import (
     AutoScalingReplacingUpdate, AutoScalingRollingUpdate, UpdatePolicy
 )
 from troposphere.cloudwatch import Alarm, MetricDimension
-from troposphere.autoscaling import LaunchConfiguration, ScalingPolicy
+from troposphere.autoscaling import LaunchConfiguration, ScalingPolicy, StepAdjustments
 
-from troposphere import FindInMap, Ref, Template, Parameter, Tags
-from troposphere.iam import InstanceProfile, Role
-from troposphere.efs import FileSystem, MountTarget
-from troposphere.ec2 import SecurityGroup, SecurityGroupRule, Instance
-from awacs.aws import Allow, Statement, PolicyDocument, Action
+###############################################################################################
+
+USER_DATA_MASTER = """Content-Type: multipart/mixed; boundary="//"
+MIME-Version: 1.0
+
+--//
+Content-Type: text/cloud-config; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Content-Disposition: attachment; filename="cloud-config.txt"
+
+#cloud-config
+cloud_final_modules:
+- [scripts-user, always]
+
+--//
+Content-Type: text/x-shellscript; charset="us-ascii"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Content-Disposition: attachment; filename="userdata.txt"
+
+#!/bin/bash
+amazon-linux-extras install epel
+yum update --security -y
+yum install --enablerepo=epel -y nodejs
+
+amazon-linux-extras install docker -y
+service docker start
+systemctl enable docker
+
+AwsRegion=$(curl -s 169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/.$//')
+DockerVersion=$(docker version --format '{{.Server.Version}}')
+yum install -y git awslogs
+sed -i -e "s/us-east-1/$AwsRegion/g" /etc/awslogs/awscli.conf
+sed -i -e 's/log_group_name = \/var\/log\/messages/log_group_name = [CloudWatchIdentifier]/g' /etc/awslogs/awslogs.conf
+sed -i -e 's/log_stream_name = {instance_id}/log_stream_name = messages-stack/g' /etc/awslogs/awslogs.conf
+sed -i -e 's/\/var\/log\/messages/\/var\/log\/messages-stack/g' /etc/awslogs/awslogs.conf
+systemctl start awslogsd
+systemctl enable awslogsd.service
+echo 'Start service in [nameMaster]' > /var/log/messages-stack
+#git config --system credential.helper '!aws codecommit credential-helper $@'
+#git config --system credential.UseHttpPath true
+
+# Use this command if you only want to support EBS
+docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.06.1-ce-aws1 CLOUD_PLATFORM=AWS AWS_REGION=${AwsRegion} EFS_SUPPORTED=0 DEBUG=0
+
+rm -rf /scripts
+mkdir /scripts
+cd /scripts
+git clone https://github.com/sbraer/AwsNodeJsCodeDeploy.git
+cd AwsNodeJsCodeDeploy/
+npm install
+chmod +x create_swarm.sh
+chmod +x update_service.sh
+crontab -r
+chmod +x docker_login.sh
+./docker_login.sh
+(crontab -l 2>/dev/null; echo "0 */6 * * * /scripts/AwsNodeJsCodeDeploy/docker_login.sh -with args") | crontab -
+./create_swarm.sh [ipPrivateList]
+--//"""
+USER_DATA_WORKER = """#!/bin/bash
+yum update --security -y
+amazon-linux-extras install docker -y
+sed -i '/ExecStart=\/usr\/bin\/dockerd /cExecStart=\/usr\/bin\/dockerd -H fd:// --label [label]=true'  /lib/systemd/system/docker.service
+service docker start
+systemctl enable docker
+
+AwsRegion=$(curl -s 169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/.$//')
+DockerVersion=$(docker version --format '{{.Server.Version}}')
+yum install -y git
+# Use this command if you only want to support EBS
+docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.06.1-ce-aws1 CLOUD_PLATFORM=AWS AWS_REGION=${AwsRegion} EFS_SUPPORTED=0 DEBUG=0
+
+#git config --system credential.helper '!aws codecommit credential-helper $@'
+#git config --system credential.UseHttpPath true
+mkdir /scripts
+cd /scripts
+git clone https://github.com/sbraer/AwsNodeJsCodeDeploy.git
+cd AwsNodeJsCodeDeploy/
+chmod +x join_to_swarm.sh
+./join_to_swarm.sh [ipPrivateList]
+"""
+
 
 ###############################################################################################
 class SecurityGroupClass(object):
-    def __init__(self, name=None, cidrBlock="", type="", fromPort=-1, toPort=-1):
+    def __init__(self, name=None, cidrBlock = "", type = "", fromPort = -1, toPort = -1):
         self.name = name
         self.cidrBlock = cidrBlock
         self.type = type
@@ -34,11 +113,12 @@ class SecurityGroupClass(object):
 
 
 class Ec2Machine(object):
-    def __init__(self, name=None, ip=None, instanceType="t2.micro"):
+    def __init__(self, name=None, ip=None, instanceType="t2.micro", label=None):
         self.name = name
         self.ip = ip
         self.instanceType = instanceType
         self.instance = None
+        self.label = label
 
 
 class SubnetClass(object):
@@ -49,6 +129,7 @@ class SubnetClass(object):
         self.MapPublicIpOnLaunch = mapPublicIpOnLaunch
         self.instance = None
         self.ec2 = None
+        self.db = None
 
 
 class VpcClass(object):
@@ -57,8 +138,6 @@ class VpcClass(object):
         self.CidrBlock = cidrBlock
         self.subnets = []
         self.instance = None
-
-
 #######################################################################################
 
 
@@ -66,13 +145,14 @@ environmentString = "MyEnvironment-"  # <-- Add dash here
 cloudWatchIdentifier = "Stack2"
 instanceTypeMaster = "t2.micro"
 instanceTypeWorker = "t2.micro"
+instanceTypeDb = "t2.micro"
 
 DesiredCapacity = 1
 MinSize = 1
 MaxSize = 3
 
 labels = ["web"]
-# labels = ["web", "db"]
+#labels = ["web", "db"]
 
 CodeCommitResource = ["arn:aws:codecommit:eu-central-1:838080890745:AwsCodeTest"]  # or [] to disable this role
 vpc = VpcClass("myVPC", "192.168.0.0/16")
@@ -81,8 +161,12 @@ vpc.subnets.append(SubnetClass("Subnet2", "192.168.16.0/20", 1, True))
 vpc.subnets.append(SubnetClass("Subnet3", "192.168.32.0/20", 2, True))
 
 vpc.subnets[0].ec2 = Ec2Machine("MasterA", "192.168.0.250", instanceTypeMaster)
-# vpc.subnets[1].ec2 = Ec2Machine("MasterB", "192.168.16.250", instanceTypeMaster)
-# vpc.subnets[2].ec2 = Ec2Machine("MasterC", "192.168.32.250", instanceTypeMaster)
+#vpc.subnets[1].ec2 = Ec2Machine("MasterB", "192.168.16.250", instanceTypeMaster)
+#vpc.subnets[2].ec2 = Ec2Machine("MasterC", "192.168.32.250", instanceTypeMaster)
+
+vpc.subnets[0].db = Ec2Machine("Mongo1", "192.168.0.249", instanceTypeDb, "mongo1")
+vpc.subnets[1].db = Ec2Machine("Mongo2", "192.168.16.249", instanceTypeDb, "mongo2")
+vpc.subnets[2].db = Ec2Machine("Mongo13", "192.168.32.249", instanceTypeDb, "mongo3")
 
 securityMasterIngress = [
     # Used from docker for Swarm Managers
@@ -92,8 +176,7 @@ securityMasterIngress = [
     SecurityGroupClass("DockerForOverlayNetworkTraffic", vpc.CidrBlock, "udp", 4789, 4789),
     # My inbound ports
     SecurityGroupClass("ssh", "0.0.0.0/0", "tcp", 22, 22),
-    SecurityGroupClass("http64000", vpc.CidrBlock, "tcp", 64000, 64000),
-    SecurityGroupClass("testdocker", "0.0.0.0/0", "tcp", 5000, 5001),
+    SecurityGroupClass("http64000", vpc.CidrBlock, "tcp", 64000, 64000)
 ]
 
 securityMasterEgress = [
@@ -114,6 +197,21 @@ securityWorkerEgress = [
     SecurityGroupClass("Input", "0.0.0.0/0", "-1"),
 ]
 
+securityDbIngress = [
+    # Used from docker for Swarm Workers
+    SecurityGroupClass("DockerForCommunicationAmongNodesTcp", vpc.CidrBlock, "tcp", 7946, 7946),
+    SecurityGroupClass("DockerForCommunicationAmongNodesUdp", vpc.CidrBlock, "udp", 7946, 7946),
+    SecurityGroupClass("DockerForOverlayNetworkTraffic", vpc.CidrBlock, "udp", 4789, 4789),
+    # My inbound ports
+    SecurityGroupClass("ssh", "0.0.0.0/0", "tcp", 22, 22),
+    SecurityGroupClass("mongodb", vpc.CidrBlock, "tcp", 27017, 27017),
+]
+
+securityDbEgress = [
+    SecurityGroupClass("Input", "0.0.0.0/0", "-1"),
+]
+
+
 ipPrivateList = ""
 for f in vpc.subnets:
     if f.ec2 is not None:
@@ -121,16 +219,15 @@ for f in vpc.subnets:
             ipPrivateList += " "
         ipPrivateList += f.ec2.ip
 
-template = Template(
-    "This template deploys a VPC, with a pair of public and private subnets spread across two Availability Zones. It deploys an Internet Gateway, with a default route on the public subnets. It deploys a pair of NAT Gateways (one in each AZ), and default routes for them in the private subnets.")
+template = Template("This template deploys a VPC, with a pair of public and private subnets spread across two Availability Zones. It deploys an Internet Gateway, with a default route on the public subnets. It deploys a pair of NAT Gateways (one in each AZ), and default routes for them in the private subnets.")
 template.set_version("2010-09-09")
 ########################## MAPPING #####################################################
 
 template.add_mapping('RegionMap', {
-    "ap-south-1": {"AMI": "ami-0937dcc711d38ef3f"},
-    "eu-west-3": {"AMI": "ami-0854d53ce963f69d8"},
-    "eu-north-1": {"AMI": "ami-6d27a913"},
-    "eu-west-2": {"AMI": "ami-0664a710233d7c148"},
+    "ap-south-1":      {"AMI": "ami-0937dcc711d38ef3f"},
+    "eu-west-3":      {"AMI": "ami-0854d53ce963f69d8"},
+    "eu-north-1":      {"AMI": "ami-6d27a913"},
+    "eu-west-2":      {"AMI": "ami-0664a710233d7c148"},
     "eu-west-1": {"AMI": "ami-0fad7378adf284ce0"},
     "ap-northeast-2": {"AMI": "ami-018a9a930060d38aa"},
     "ap-northeast-1": {"AMI": "ami-0d7ed3ddb85b521a6"},
@@ -157,84 +254,66 @@ keyPar_param = template.add_parameter(Parameter(
 policies = []
 if len(CodeCommitResource) > 0:
     policies.append(Policy(
-        PolicyName=environmentString + "GitPolicy",
-        PolicyDocument=awacs.aws.Policy(
-            Statement=[
-                Statement(
-                    Effect=Allow,
-                    Action=[Action("codecommit", "ListRepositories")],
-                    Resource=["*"]
-                ),
-                Statement(
-                    Effect=Allow,
-                    Action=[Action("codecommit", "GitPull")],
-                    Resource=CodeCommitResource
-                ),
-            ],
+            PolicyName=environmentString + "GitPolicy",
+            PolicyDocument=awacs.aws.Policy(
+                Statement=[
+                    Statement(
+                        Effect=Allow,
+                        Action=[Action("codecommit", "ListRepositories")],
+                        Resource=["*"]
+                    ),
+                    Statement(
+                        Effect=Allow,
+                        Action=[Action("codecommit", "GitPull")],
+                        Resource=CodeCommitResource
+                    ),
+                ],
+            )
+        ))
+
+policies.append(Policy(
+            PolicyName=environmentString + "CWMyLogPolicy",
+            PolicyDocument=awacs.aws.Policy(
+                Statement=[
+                    Statement(
+                        Effect=Allow,
+                        Action=[
+                            Action("logs", "CreateLogGroup"),
+                            Action("logs", "CreateLogStream"),
+                            Action("logs", "PutLogEvents"),
+                            Action("logs", "DescribeLogStreams"),
+                        ],
+                        Resource=["arn:aws:logs:*:*:*"]
+                    )
+                ]
+            )
         )
-    ))
+    )
 
 policies.append(Policy(
-    PolicyName=environmentString + "CWMyLogPolicy",
-    PolicyDocument=awacs.aws.Policy(
-        Statement=[
-            Statement(
-                Effect=Allow,
-                Action=[
-                    Action("logs", "CreateLogGroup"),
-                    Action("logs", "CreateLogStream"),
-                    Action("logs", "PutLogEvents"),
-                    Action("logs", "DescribeLogStreams"),
-                ],
-                Resource=["arn:aws:logs:*:*:*"]
+            PolicyName=environmentString + "CloudStor",
+            PolicyDocument=awacs.aws.Policy(
+                Statement=[
+                    Statement(
+                        Effect=Allow,
+                        Action=[
+                            Action("ec2", "CreateTags"),
+                            Action("ec2", "AttachVolume"),
+                            Action("ec2", "DetachVolume"),
+                            Action("ec2", "CreateVolume"),
+                            Action("ec2", "DeleteVolume"),
+                            Action("ec2", "DescribeVolumes"),
+                            Action("ec2", "DescribeVolumeStatus"),
+                            Action("ec2", "CreateSnapshot"),
+                            Action("ec2", "DeleteSnapshot"),
+                            Action("ec2", "DescribeSnapshots")
+                        ],
+                        Resource=["*"]
+                    )
+                ]
             )
-        ]
+        )
     )
-)
-)
-
-policies.append(Policy(
-    PolicyName=environmentString + "CloudStor",
-    PolicyDocument=awacs.aws.Policy(
-        Statement=[
-            Statement(
-                Effect=Allow,
-                Action=[
-                    Action("ec2", "CreateTags"),
-                    Action("ec2", "AttachVolume"),
-                    Action("ec2", "DetachVolume"),
-                    Action("ec2", "CreateVolume"),
-                    Action("ec2", "DeleteVolume"),
-                    Action("ec2", "DescribeVolumes"),
-                    Action("ec2", "DescribeVolumeStatus"),
-                    Action("ec2", "CreateSnapshot"),
-                    Action("ec2", "DeleteSnapshot"),
-                    Action("ec2", "DescribeSnapshots")
-                ],
-                Resource=["*"]
-            )
-        ]
-    )
-)
-)
-
-# EFS
-policies.append(Policy(
-    PolicyName=environmentString + "EFS",
-    PolicyDocument=awacs.aws.Policy(
-        Statement=[
-            Statement(
-                Effect=Allow,
-                Action=[
-                    Action('elasticfilesystem', 'DescribeFileSystems'),
-                    Action('elasticfilesystem', 'DescribeTags')
-                ],
-                Resource=["*"]
-            )
-        ]
-    )
-)
-)
 
 rootRole = template.add_resource(Role(
     "RootRole",
@@ -252,7 +331,7 @@ rootRole = template.add_resource(Role(
         "arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM"
     ],
     Path="/",
-    Policies=policies
+    Policies= policies
 ))
 
 rootInstanceProfile = template.add_resource(InstanceProfile(
@@ -323,7 +402,7 @@ route = template.add_resource(
     Route(
         'Route',
         DependsOn='AttachGateway',
-        GatewayId=Ref(internetGateway),
+        GatewayId=Ref('InternetGateway'),
         DestinationCidrBlock='0.0.0.0/0',
         RouteTableId=Ref(routeTable),
     )
@@ -333,7 +412,7 @@ route = template.add_resource(
 for f in vpc.subnets:
     template.add_resource(
         SubnetRouteTableAssociation(
-            'SubnetRouteTableAssociation' + f.name,
+            'SubnetRouteTableAssociation'+f.name,
             SubnetId=Ref(f.instance),
             RouteTableId=Ref(routeTable),
         )
@@ -362,7 +441,7 @@ for f in securityMasterEgress:
 
 instanceSecurityGroup = template.add_resource(
     SecurityGroup(
-        environmentString.replace("-", "") + 'CustomSecurityGroupIngressMaster',
+        environmentString.replace("-", "")+'CustomSecurityGroupIngressMaster',
         GroupDescription='CustomSecurity Group Ingress Master',
         SecurityGroupIngress=securityGroupIngress,
         SecurityGroupEgress=securityGroupEgress,
@@ -374,47 +453,45 @@ instanceSecurityGroup = template.add_resource(
     )
 )
 
-########################### Create EFS #########################################
 
-efs_security_group_rule = SecurityGroupRule(
-    IpProtocol='tcp',
-    FromPort='2049',
-    ToPort='2049',
-    CidrIp=vpc.CidrBlock
-)
+###################### Add PORT #####################################
 
-# Security group that's applied to the Mount Targets.
-efs_security_group = SecurityGroup(
-    "SecurityGroup",
-    SecurityGroupIngress=[efs_security_group_rule],
-    VpcId=Ref(VPC),
-    GroupDescription="Allow NFS over TCP"
-)
-template.add_resource(efs_security_group)
+securityGroupDbIngress = []
+securityGroupDbEgress = []
 
-# Create FileSystem. This is the actual filesystem, which has one or more
-# mount targets. Give it some tags so we can identify it later.
-tags = Tags(Name=environmentString + 'EFSFileSystem')
-efs_file_system = FileSystem(
-    "EFSFileSystem",
-    FileSystemTags=tags
-)
-template.add_resource(efs_file_system)
+for f in securityDbIngress:
+    securityGroupDbIngress.append(SecurityGroupRule(
+        IpProtocol=f.type,
+        FromPort=f.fromPort,
+        ToPort=f.toPort,
+        CidrIp=f.cidrBlock
+    ))
 
-# create MountTarget. You really want a mount target in each subnet where
-# it's required, but for the purpose of this example we'll
-# put it in just one.
-for f in vpc.subnets:
-    efs_mount_target = MountTarget(
-        "EFSMountTarget" + f.name,
-        FileSystemId=Ref(efs_file_system),
-        SecurityGroups=[Ref(efs_security_group)],
-        SubnetId=Ref(f.instance)
+for f in securityDbEgress:
+    securityGroupDbEgress.append(SecurityGroupRule(
+        IpProtocol=f.type,
+        FromPort=f.fromPort,
+        ToPort=f.toPort,
+        CidrIp=f.cidrBlock
+    ))
+
+instanceSecurityDbGroup = template.add_resource(
+    SecurityGroup(
+        environmentString.replace("-", "")+'CustomSecurityGroupIngressDb',
+        GroupDescription='CustomSecurity Group Ingress Db',
+        SecurityGroupIngress=securityGroupDbIngress,
+        SecurityGroupEgress=securityGroupDbEgress,
+        VpcId=Ref(VPC),
+        Tags=Tags(
+            Name=environmentString + "CustomSecurityGroupIngressDb",
+            Stack=Ref("AWS::StackName")
+        )
     )
-    template.add_resource(efs_mount_target)
+)
 
 ########################### create ec2 master ##################################
 for f in vpc.subnets:
+	# master machine
     if f.ec2 is not None:
         instance = template.add_resource(ec2.Instance(
             f.ec2.name,
@@ -424,74 +501,11 @@ for f in vpc.subnets:
             ImageId=FindInMap("RegionMap", Ref("AWS::Region"), "AMI"),
             InstanceType=f.ec2.instanceType,
             KeyName=Ref(keyPar_param),
-            UserData=Base64(Join('', [
-"""Content-Type: multipart/mixed; boundary="//"
-MIME-Version: 1.0
-
---//
-Content-Type: text/cloud-config; charset="us-ascii"
-MIME-Version: 1.0
-Content-Transfer-Encoding: 7bit
-Content-Disposition: attachment; filename="cloud-config.txt"
-
-#cloud-config
-cloud_final_modules:
-- [scripts-user, always]
-
---//
-Content-Type: text/x-shellscript; charset="us-ascii"
-MIME-Version: 1.0
-Content-Transfer-Encoding: 7bit
-Content-Disposition: attachment; filename="userdata.txt"
-
-#!/bin/bash
-amazon-linux-extras install epel -y
-yum update --security -y
-yum install --enablerepo=epel -y nodejs
-
-amazon-linux-extras install docker -y
-service docker start
-systemctl enable docker
-
-AwsRegion=$(curl -s 169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/.$//')
-DockerVersion=$(docker version --format '{{.Server.Version}}')
-yum install -y git awslogs
-sed -i -e "s/us-east-1/$AwsRegion/g" /etc/awslogs/awscli.conf
-sed -i -e 's/log_group_name = \/var\/log\/messages/log_group_name = [CloudWatchIdentifier]/g' /etc/awslogs/awslogs.conf
-sed -i -e 's/log_stream_name = {instance_id}/log_stream_name = messages-stack/g' /etc/awslogs/awslogs.conf
-sed -i -e 's/\/var\/log\/messages/\/var\/log\/messages-stack/g' /etc/awslogs/awslogs.conf
-systemctl start awslogsd
-systemctl enable awslogsd.service
-echo 'Start service in [nameMaster]' > /var/log/messages-stack
-#git config --system credential.helper '!aws codecommit credential-helper $@'
-#git config --system credential.UseHttpPath true
-
-# Use this command if you only want to support EBS
-docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.09.2-ce-aws1 CLOUD_PLATFORM=AWS EFS_ID_REGULAR=""",
-Ref(efs_file_system),
-""" EFS_ID_MAXIO=""",
-Ref(efs_file_system),
-""" AWS_REGION=${AwsRegion} EFS_SUPPORTED=1 DEBUG=0
-
-rm -rf /scripts
-mkdir /scripts
-cd /scripts
-git clone https://github.com/sbraer/AwsNodeJsCodeDeploy.git
-cd AwsNodeJsCodeDeploy/
-npm install
-chmod +x create_swarm.sh
-chmod +x update_service.sh
-crontab -r
-chmod +x docker_login.sh
-./docker_login.sh
-(crontab -l 2>/dev/null; echo "0 */6 * * * /scripts/AwsNodeJsCodeDeploy/docker_login.sh -with args") | crontab -
-./create_swarm.sh [ipPrivateList]
---//"""
-                 .replace("[ipPrivateList]", ipPrivateList)
-                 .replace("[CloudWatchIdentifier]", cloudWatchIdentifier)
-                 .replace("[nameMaster]", f.ec2.name)
-            ])
-                            ),
+            UserData=Base64(USER_DATA_MASTER
+                .replace("[ipPrivateList]", ipPrivateList)
+                .replace("[CloudWatchIdentifier]", cloudWatchIdentifier)
+                .replace("[nameMaster]", f.ec2.name)
+                ),
             Tags=Tags(
                 Name=environmentString + f.ec2.name,
                 Stack=Ref("AWS::StackName")
@@ -517,7 +531,59 @@ chmod +x docker_login.sh
         f.ec2.instance = instance
         alarmMaster = template.add_resource(Alarm(
             "AlarmRecovery" + f.ec2.name,
-            AlarmDescription="Recovery " + f.ec2.name,
+            AlarmDescription="Recovery "+f.ec2.name,
+            Namespace="AWS/EC2",
+            MetricName="StatusCheckFailed_System",
+            Dimensions=[
+                MetricDimension(
+                    Name="InstanceId",
+                    Value=Ref(instance)
+                ),
+            ],
+            Statistic="Maximum",
+            Period="60",
+            EvaluationPeriods="5",
+            Threshold="0",
+            ComparisonOperator="GreaterThanThreshold",
+            AlarmActions=[Sub('arn:aws:automate:${AWS::Region}:ec2:recover')]
+        ))
+    # db machine
+    if f.db is not None:
+        instance = template.add_resource(ec2.Instance(
+            f.db.name,
+            DisableApiTermination="false",
+            InstanceInitiatedShutdownBehavior="stop",
+            IamInstanceProfile=Ref(rootInstanceProfile),
+            ImageId=FindInMap("RegionMap", Ref("AWS::Region"), "AMI"),
+            InstanceType=f.db.instanceType,
+            KeyName=Ref(keyPar_param),
+            UserData=Base64(USER_DATA_WORKER.replace("[ipPrivateList]", ipPrivateList).replace("[label]", f.db.label)),
+            Tags=Tags(
+                Name=environmentString + f.db.name,
+                Stack=Ref("AWS::StackName")
+            ),
+            NetworkInterfaces=[
+                ec2.NetworkInterfaceProperty(
+                    DeleteOnTermination="true",
+                    Description="Primary network interface",
+                    DeviceIndex="0",
+                    SubnetId=Ref(f.instance),
+                    AssociatePublicIpAddress="true",
+                    PrivateIpAddresses=[
+                        ec2.PrivateIpAddressSpecification(
+                            "PrivateIpAddress",
+                            Primary="true",
+                            PrivateIpAddress=f.db.ip
+                        )
+                    ],
+                    GroupSet=[Ref(instanceSecurityDbGroup)]
+                )
+            ],
+        ))
+        f.db.instance = instance
+        alarmdb = template.add_resource(Alarm(
+            "AlarmRecovery" + f.db.name,
+            AlarmDescription="Recovery "+f.db.name,
             Namespace="AWS/EC2",
             MetricName="StatusCheckFailed_System",
             Dimensions=[
@@ -560,7 +626,7 @@ for f in securityWorkerEgress:
 
 instanceSecurityWorkerGroup = template.add_resource(
     SecurityGroup(
-        environmentString.replace("-", "") + 'CustomSecurityGroupIngressWorker',
+        environmentString.replace("-", "")+'CustomSecurityGroupIngressWorker',
         GroupDescription='CustomSecurity Group Ingress Master',
         SecurityGroupIngress=securityGroupIngressWorker,
         SecurityGroupEgress=securityGroupEgressWorker,
@@ -572,41 +638,16 @@ instanceSecurityWorkerGroup = template.add_resource(
     )
 )
 
+
 for f in labels:
     LaunchConfig = template.add_resource(LaunchConfiguration(
-        "LaunchConfiguration" + f,
+        "LaunchConfiguration"+f,
         ImageId=FindInMap("RegionMap", Ref("AWS::Region"), "AMI"),
         InstanceType=instanceTypeWorker,
         KeyName=Ref(keyPar_param),
         IamInstanceProfile=Ref(rootInstanceProfile),
         SecurityGroups=[Ref(instanceSecurityWorkerGroup)],
-        UserData=Base64(Join('', ["""#!/bin/bash
-yum update --security -y
-amazon-linux-extras install docker -y
-sed -i '/ExecStart=\/usr\/bin\/dockerd /cExecStart=\/usr\/bin\/dockerd $OPTIONS $DOCKER_STORAGE_OPTIONS --label [label]=true'  /lib/systemd/system/docker.service
-service docker start
-systemctl enable docker
-
-AwsRegion=$(curl -s 169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/.$//')
-DockerVersion=$(docker version --format '{{.Server.Version}}')
-yum install -y git
-# Use this command if you only want to support EBS
-docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.09.2-ce-aws1 CLOUD_PLATFORM=AWS EFS_ID_REGULAR=""",
-Ref(efs_file_system),
-""" EFS_ID_MAXIO=""",
-Ref(efs_file_system),
-""" AWS_REGION=${AwsRegion} EFS_SUPPORTED=1 DEBUG=0
-
-#git config --system credential.helper '!aws codecommit credential-helper $@'
-#git config --system credential.UseHttpPath true
-mkdir /scripts
-cd /scripts
-git clone https://github.com/sbraer/AwsNodeJsCodeDeploy.git
-cd AwsNodeJsCodeDeploy/
-chmod +x join_to_swarm.sh
-./join_to_swarm.sh [ipPrivateList]
-""".replace("[ipPrivateList]", ipPrivateList).replace("[label]", f)])
-                        ),
+        UserData=Base64(USER_DATA_WORKER.replace("[ipPrivateList]", ipPrivateList).replace("[label]", f)),
         BlockDeviceMappings=[
             ec2.BlockDeviceMapping(
                 DeviceName="/dev/xvda",
@@ -615,23 +656,23 @@ chmod +x join_to_swarm.sh
                 )
             )
         ]
-    )
+        )
     )
 
     AutoscalingGroupX = template.add_resource(AutoScalingGroup(
-        "AutoscalingGroup" + f,
+        "AutoscalingGroup"+f,
         Cooldown=300,
         HealthCheckGracePeriod=300,
         DesiredCapacity=DesiredCapacity,
         MinSize=MinSize,
         MaxSize=MaxSize,
         Tags=[
-            Tag("Name", environmentString + "AutoscalingGroup" + f, True)
+            Tag("Name", environmentString+"AutoscalingGroup"+f, True)
         ],
         LaunchConfigurationName=Ref(LaunchConfig),
         VPCZoneIdentifier=subnetsList,
         # LoadBalancerNames=[Ref(LoadBalancer)],
-        # AvailabilityZones=subnetsList,
+        #AvailabilityZones=subnetsList,
         HealthCheckType="EC2",
         UpdatePolicy=UpdatePolicy(
             AutoScalingReplacingUpdate=AutoScalingReplacingUpdate(
@@ -647,7 +688,7 @@ chmod +x join_to_swarm.sh
     ))
 
     ScalePolicyUp = template.add_resource(ScalingPolicy(
-        "HTTPRequestScalingPolicyUp" + f,
+        "HTTPRequestScalingPolicyUp"+f,
         AutoScalingGroupName=Ref(AutoscalingGroupX),
         AdjustmentType="ChangeInCapacity",
         Cooldown="300",
@@ -655,7 +696,7 @@ chmod +x join_to_swarm.sh
     ))
 
     ScalePolicyDown = template.add_resource(ScalingPolicy(
-        "HTTPRequestScalingPolicyDown" + f,
+        "HTTPRequestScalingPolicyDown"+f,
         AutoScalingGroupName=Ref(AutoscalingGroupX),
         AdjustmentType="ChangeInCapacity",
         Cooldown="300",
@@ -663,7 +704,7 @@ chmod +x join_to_swarm.sh
     ))
 
     HTTPRequestAlarmUp = template.add_resource(Alarm(
-        "HTTPRequestAlarmUp" + f,
+        "HTTPRequestAlarmUp"+f,
         AlarmDescription="Alarm if Network out is > 4.000.000",
         Namespace="AWS/EC2",
         MetricName="NetworkOut",
@@ -674,7 +715,7 @@ chmod +x join_to_swarm.sh
             ),
         ],
         Statistic="Average",
-        Period="60",  # 1 minute
+        Period="60", # 1 minute
         EvaluationPeriods="1",
         Threshold="4000000",
         ComparisonOperator="GreaterThanOrEqualToThreshold",
@@ -682,7 +723,7 @@ chmod +x join_to_swarm.sh
     ))
 
     HTTPRequestAlarmDown = template.add_resource(Alarm(
-        "HTTPRequestAlarmDown" + f,
+        "HTTPRequestAlarmDown"+f,
         AlarmDescription="Alarm if Network is < 1.000.000",
         Namespace="AWS/EC2",
         MetricName="NetworkOut",
@@ -693,7 +734,7 @@ chmod +x join_to_swarm.sh
             ),
         ],
         Statistic="Average",
-        Period="60",  # 1 minute
+        Period="60", # 1 minute
         EvaluationPeriods="1",
         Threshold="1000000",
         ComparisonOperator="LessThanOrEqualToThreshold",
@@ -705,18 +746,27 @@ chmod +x join_to_swarm.sh
 outputs = []
 
 outputs.append(Output(
-    "VPC",
-    Description="A reference to the created VPC",
-    Value=Ref(VPC),
-))
+        "VPC",
+        Description="A reference to the created VPC",
+        Value=Ref(VPC),
+    ))
 
 for f in vpc.subnets:
     if f.ec2 is not None:
         outputs.append(Output(
-            "PublicIP" + f.ec2.name,
-            Description="Public IP address of the newly created EC2 instance: " + f.ec2.name,
-            Value=GetAtt(f.ec2.instance, "PublicIp")
+                "PublicIP"+f.ec2.name,
+                Description="Public IP address of the newly created EC2 instance: " + f.ec2.name,
+                Value=GetAtt(f.ec2.instance, "PublicIp")
+            )
         )
+
+for f in vpc.subnets:
+    if f.db is not None:
+        outputs.append(Output(
+                "PublicIP"+f.db.name,
+                Description="Public IP address of the newly created EC2 instance: " + f.db.name,
+                Value=GetAtt(f.db.instance, "PublicIp")
+            )
         )
 
 for f in vpc.subnets:
@@ -724,10 +774,10 @@ for f in vpc.subnets:
         f.name,
         Description="A reference to the public subnet in the availability Zone",
         Value=Ref(f.instance)
-    )
+        )
     )
 
 template.add_output(outputs)
 
 print(template.to_yaml())
-# print(template.to_json())
+#print(template.to_json())
