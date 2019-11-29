@@ -166,7 +166,7 @@ vpc.subnets[0].ec2 = Ec2Machine("MasterA", "192.168.0.250", instanceTypeMaster)
 
 vpc.subnets[0].db = Ec2Machine("Mongo1", "192.168.0.249", instanceTypeDb, "mongo1")
 vpc.subnets[1].db = Ec2Machine("Mongo2", "192.168.16.249", instanceTypeDb, "mongo2")
-vpc.subnets[2].db = Ec2Machine("Mongo13", "192.168.32.249", instanceTypeDb, "mongo3")
+vpc.subnets[2].db = Ec2Machine("Mongo3", "192.168.32.249", instanceTypeDb, "mongo3")
 
 securityMasterIngress = [
     # Used from docker for Swarm Managers
