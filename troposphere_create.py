@@ -82,6 +82,9 @@ yum update --security -y
 amazon-linux-extras install docker -y
 sed -i '/ExecStart=\/usr\/bin\/dockerd /cExecStart=\/usr\/bin\/dockerd -H fd:// --label [label]=true'  /lib/systemd/system/docker.service
 service docker start
+systemctl daemon-reload
+sleep 5
+service docker restart
 systemctl enable docker
 
 AwsRegion=$(curl -s 169.254.169.254/latest/meta-data/placement/availability-zone | sed 's/.$//')
