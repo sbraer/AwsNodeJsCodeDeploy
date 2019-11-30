@@ -193,7 +193,7 @@ securityWorkerIngress = [
     SecurityGroupClass("DockerForOverlayNetworkTraffic", vpc.CidrBlock, "udp", 4789, 4789),
     # My inbound ports
     SecurityGroupClass("ssh", "0.0.0.0/0", "tcp", 22, 22),
-    SecurityGroupClass("testdocker", "0.0.0.0/0", "tcp", 5000, 5001),
+    SecurityGroupClass("testdocker", "0.0.0.0/0", "tcp", 5000, 5002),
 ]
 
 securityWorkerEgress = [
