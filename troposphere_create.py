@@ -43,7 +43,7 @@ amazon-linux-extras install epel
 yum update --security -y
 yum install --enablerepo=epel -y nodejs
 
-amazon-linux-extras install docker -y
+amazon-linux-extras install docker=18.09.9 -y
 service docker start
 systemctl enable docker
 
@@ -61,7 +61,7 @@ echo 'Start service in [nameMaster]' > /var/log/messages-stack
 #git config --system credential.UseHttpPath true
 
 # Use this command if you only want to support EBS
-docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.06.1-ce-aws1 CLOUD_PLATFORM=AWS AWS_REGION=${AwsRegion} EFS_SUPPORTED=0 DEBUG=0
+docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.09.2-ce-aws1 CLOUD_PLATFORM=AWS AWS_REGION=${AwsRegion} EFS_SUPPORTED=0 DEBUG=0
 
 rm -rf /scripts
 mkdir /scripts
@@ -79,7 +79,7 @@ chmod +x docker_login.sh
 --//"""
 USER_DATA_WORKER = """#!/bin/bash
 yum update --security -y
-amazon-linux-extras install docker -y
+amazon-linux-extras install docker=18.09.9 -y
 sed -i '/ExecStart=\/usr\/bin\/dockerd /cExecStart=\/usr\/bin\/dockerd -H fd:// --label [label]=true'  /lib/systemd/system/docker.service
 service docker start
 systemctl daemon-reload
@@ -91,7 +91,7 @@ AwsRegion=$(curl -s 169.254.169.254/latest/meta-data/placement/availability-zone
 DockerVersion=$(docker version --format '{{.Server.Version}}')
 yum install -y git
 # Use this command if you only want to support EBS
-docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.06.1-ce-aws1 CLOUD_PLATFORM=AWS AWS_REGION=${AwsRegion} EFS_SUPPORTED=0 DEBUG=0
+docker plugin install --alias cloudstor:aws --grant-all-permissions docker4x/cloudstor:18.09.2-ce-aws1 CLOUD_PLATFORM=AWS AWS_REGION=${AwsRegion} EFS_SUPPORTED=0 DEBUG=0
 
 #git config --system credential.helper '!aws codecommit credential-helper $@'
 #git config --system credential.UseHttpPath true
